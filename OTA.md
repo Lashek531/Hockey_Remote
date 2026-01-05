@@ -57,7 +57,7 @@ Hockey_Remote/
 
 ```powershell
 $udp = New-Object System.Net.Sockets.UdpClient
-$udp.Connect("10.1.30.10", 4210)
+$udp.Connect("192.168.149.2", 4210)
 $packet = [byte[]](0xA5,0x01,0x70,0x01,0x00,0x00)
 $udp.Send($packet, $packet.Length) | Out-Null
 $udp.Close()
@@ -70,7 +70,7 @@ $udp.Close()
 В каталоге проекта:
 
 ```powershell
-pio run -t upload --upload-port 10.1.30.10
+pio run -t upload --upload-port 192.168.149.2
 ```
 
 После успешной загрузки плата автоматически перезагружается.
