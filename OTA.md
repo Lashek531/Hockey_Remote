@@ -1,72 +1,63 @@
-# OTA‑обновление ESP32 — подробная пошаговая инструкция
+# OTA‑прошивка ESP32 (Hockey_Remote)
 
-Документ описывает **полный и проверенный на практике процесс OTA‑обновления** прошивки ESP32 в проекте *Hockey_Remote*.
+Актуальная, **проверенная на практике** инструкция OTA‑обновления прошивки ESP32 в проекте **Hockey_Remote**.
 
-Инструкция рассчитана на:
+Инструкция ориентирована на:
 
 * **Windows**
 * **PowerShell**
-* **PlatformIO**
-* OTA через **UDP + ArduinoOTA (espota)**
+* **VS Code + PlatformIO**
+* OTA через **UDP (CMD_OTA_MODE) + ArduinoOTA / espota**
 
 Без USB, Serial Monitor, mDNS и догадок.
 
 ---
 
-## Ключевая идея OTA в этом проекте
+## Ключевая идея
 
 ESP32 **НЕ принимает OTA постоянно**.
 
-Чтобы обновить прошивку, необходимо:
+Чтобы прошить плату, нужно строго выполнить цепочку:
 
-1. Явно перевести ESP32 в **сервисный OTA‑режим** по UDP.
-2. Получить **ACK‑подтверждение**, что режим активирован.
-3. Загрузить прошивку через PlatformIO (espota).
+1. Перевести ESP32 в **OTA‑режим** специальной UDP‑командой.
+2. Получить **ACK**, подтверждающий вход в OTA‑режим.
+3. **НЕМЕДЛЕННО** выполнить загрузку прошивки через PlatformIO (`espota`).
 
-Если любой шаг пропущен — OTA **не заработает**.
+Если пропустить любой шаг — OTA **не сработает**.
 
 ---
 
-## Требования
+## Обязательные условия
 
 ### Питание (критично)
 
-⚠ **Обязательно внешнее питание 5 V (≥ 2 A)**.
+⚠ **ESP32 должна питаться от стабильного источника 5 V (≥ 2 A)**.
 
 Запрещено:
 
 * прошивать от USB‑порта компьютера;
 * прошивать при нестабильном питании.
 
-Нарушение приводит к:
+Иначе возможны:
 
-* `No response from the ESP`;
-* обрывам OTA;
-* зависаниям ESP32.
+* зависание на `Sending invitation...`;
+* `Listen Failed`;
+* `No response from the ESP`.
 
 ---
 
-## Шаг 0. Что нужно знать заранее
+## Что нужно знать заранее
 
 * IP ESP32 (пример: `192.168.149.2`)
 * UDP‑порт ESP32: `4210`
 * OTA‑порт ESP32: `3232`
+* IP компьютера **в той же Wi‑Fi сети**, что и ESP32
 
 ---
 
-## Шаг 1. Открыть PowerShell
+## Шаг 1. Узнать IP компьютера
 
-Используется **обычный PowerShell** (не обязательно от администратора).
-
-⚠ Все команды ниже рекомендуется выполнять **в одном окне PowerShell**.
-
----
-
-## Шаг 2. Узнать IP‑адрес компьютера
-
-ESP32 должна уметь **обратиться к компьютеру**, поэтому нужно знать IP ПК в той же сети.
-
-Выполните:
+В PowerShell:
 
 ```powershell
 Get-NetIPAddress -AddressFamily IPv4 |
@@ -74,163 +65,160 @@ Get-NetIPAddress -AddressFamily IPv4 |
   Select-Object IPAddress, InterfaceAlias
 ```
 
-Пример вывода:
+Пример:
 
 ```
 IPAddress       InterfaceAlias
 ---------       --------------
-192.168.149.102 Беспроводная сеть 2
+192.168.149.102 Wi‑Fi
 ```
 
-➡ **Запомните IP компьютера** (в примере — `192.168.149.102`).
+➡ Запомни IP компьютера (в примере `192.168.149.102`).
 
 ---
 
-## Шаг 3. Задать переменную окружения ESPOTA_HOST_IP
+## Шаг 2. Проверить platformio.ini
 
-PlatformIO использует эту переменную, чтобы указать ESP32, **куда подключаться для OTA**.
+Конфигурация **должна быть именно такой** (ключевой момент — `--host_ip`):
 
-### Вариант A — временно (рекомендуется)
+```ini
+[platformio]
+default_envs = esp32dev
 
-Действует только в текущем окне PowerShell:
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
 
-```powershell
-$env:ESPOTA_HOST_IP = "192.168.149.102"
+lib_deps =
+  crankyoldgit/IRremoteESP8266 @ ^2.8.6
+  bblanchon/ArduinoJson@^7.4.2
+
+upload_protocol = espota
+upload_port = 192.168.149.2
+upload_flags =
+  --port=3232
+  --host_ip=192.168.149.102
 ```
 
-### Вариант B — автоматически (удобно)
+⚠ **Важно**:
 
-```powershell
-$env:ESPOTA_HOST_IP = (
-  Get-NetIPAddress -AddressFamily IPv4 |
-  Where-Object { $_.IPAddress -like "192.168.149.*" } |
-  Select-Object -First 1 -ExpandProperty IPAddress
-)
-```
-
-### Вариант C — постоянно (опционально)
-
-```powershell
-setx ESPOTA_HOST_IP 192.168.149.102
-```
-
-После `setx` нужно **открыть новое окно PowerShell**.
+* `--host_ip` — это **IP компьютера**, не ESP32.
+* Переменные окружения **не использовать** (из‑за багов под Windows).
 
 ---
 
-## Шаг 4. Перевести ESP32 в OTA‑режим
+## Шаг 3. Перевести ESP32 в OTA‑режим и получить ACK
 
-OTA‑режим включается **специальной UDP‑командой** `CMD_OTA_MODE (0x70)`.
-
-### Команда входа в OTA
+В PowerShell (одним блоком):
 
 ```powershell
-$udp = New-Object System.Net.Sockets.UdpClient
-$udp.Client.ReceiveTimeout = 2000
-$udp.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0))
-
-$espIp   = "192.168.149.2"
-$espPort = 4210
-
-# UDP packet: MAGIC VER CMD ID(lo) ID(hi) LEN
-[byte[]]$packet = 0xA5,0x01,0x70,0x01,0x00,0x00
-
-$remote = [System.Net.IPEndPoint]::new([
-  System.Net.IPAddress]::Parse($espIp),
-  $espPort
-)
-
-$udp.Send($packet, $packet.Length) | Out-Null
-```
-
----
-
-## Шаг 5. Прочитать ACK‑ответ от ESP32
-
-ESP32 **обязана** ответить ACK‑пакетом.
-
-Добавьте в тот же PowerShell:
-
-```powershell
-try {
-  $from = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
-  $resp = $udp.Receive([ref]$from)
-  "ACK: " + (($resp | ForEach-Object { "{0:X2}" -f $_ }) -join " ")
-}
-catch {
-  "ACK timeout"
-}
-
+$udp = New-Object System.Net.Sockets.UdpClient; \
+$udp.Client.ReceiveTimeout = 2000; \
+$udp.Connect("192.168.149.2", 4210); \
+[byte[]]$pkt = 0xA5,0x01,0x70,0x20,0x00,0x00; \
+$udp.Send($pkt, $pkt.Length) | Out-Null; \
+try { $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0); $r = $udp.Receive([ref]$ep); "ACK: " + (($r | ForEach-Object { $_.ToString("X2") }) -join " ") } catch { "NO ACK (timeout)" }; \
 $udp.Close()
 ```
 
-### Ожидаемый результат
+Ожидаемый результат:
 
 ```
-ACK: A5 01 7F 01 00 01 70
+ACK: A5 01 7F 20 00 01 70
 ```
 
 Расшифровка:
 
 * `7F` — ACK
-* `ID = 1` — совпадает с отправленным
-* `STATUS = 1` — команда принята
-* `CODE = 70` — подтверждение входа в OTA‑режим
+* `20 00` — ID (любой, главное уникальный)
+* `01` — команда принята
+* `70` — OTA‑режим
 
-❌ **Если ACK не пришёл — OTA невозможна.**
+❌ **Если ACK нет — прошивку НЕ начинать.**
 
 ---
 
-## Шаг 6. Загрузка прошивки через PlatformIO
+## Шаг 4. Немедленно прошить плату
 
-Перейдите в каталог проекта:
+⚠ **Не ждать**. OTA‑окно ограничено по времени.
+
+В PowerShell:
 
 ```powershell
 cd C:\Users\ch_73\Documents\PlatformIO\Projects\Hockey_Remote
+pio run -e esp32dev -t upload
 ```
 
-Запустите загрузку:
+Или в VS Code:
 
-```powershell
-pio run -e esp32-c3-devkitm-1 -t upload
-```
-
-Во время загрузки:
-
-* используется **espota**;
-* USB‑порт не задействован;
-* ESP32 подключается к компьютеру по Wi‑Fi.
+* открыть проект;
+* нажать **PlatformIO: Upload**.
 
 ---
 
-## Шаг 7. Завершение OTA
+## Что должно происходить при успешной OTA
 
-После успешной загрузки:
+* `espota.py` выводит `Starting on <IP компьютера>:<port>`
+* идёт прогресс загрузки
+* ESP32 перезагружается автоматически
 
-* ESP32 автоматически перезагружается;
-* OTA‑режим завершается;
-* рабочая логика (IR + сирена) снова активна.
+После перезагрузки:
+
+* OTA‑режим выключен;
+* плата работает в штатном режиме.
 
 ---
 
-## Типовые проблемы и причины
+## Типовые проблемы и решения
+
+### Зависает на `Sending invitation...`
+
+Причины:
+
+* неверный `--host_ip`;
+* ПК и ESP32 в разных сетях;
+* нестабильное питание;
+* OTA‑окно истекло.
+
+Решение:
+
+* снова отправить CMD_OTA_MODE;
+* **сразу** повторить `pio run -t upload`.
+
+---
+
+### `Listen Failed`
+
+Причина:
+
+* в `--host_ip` подставилась строка вместо IP (переменные окружения).
+
+Решение:
+
+* прописывать IP компьютера **явно**.
+
+---
 
 ### `No response from the ESP`
 
 Причины:
 
-* не задан `ESPOTA_HOST_IP`;
-* Windows Firewall блокирует `python.exe`;
-* ESP32 не в OTA‑режиме;
-* нестабильное питание.
+* OTA‑режим не включён;
+* Wi‑Fi client isolation;
+* firewall Windows блокирует Python.
 
-### ACK есть, OTA не начинается
+---
 
-Причины:
+## Золотое правило OTA в этом проекте
 
-* неверный `upload_protocol` (должен быть `espota`);
-* неверный env в PlatformIO;
-* неверный IP компьютера.
+**Каждая прошивка = новая сессия OTA**:
+
+```
+CMD_OTA_MODE  →  ACK  →  pio upload
+```
+
+Без сокращений.
 
 ---
 
@@ -239,9 +227,9 @@ pio run -e esp32-c3-devkitm-1 -t upload
 Этот порядок действий:
 
 1. IP компьютера
-2. `ESPOTA_HOST_IP`
-3. `CMD_OTA_MODE`
+2. `platformio.ini` с корректным `--host_ip`
+3. CMD_OTA_MODE
 4. ACK
 5. `pio run -t upload`
 
-— **единственный гарантированно рабочий сценарий OTA** для данного проекта.
+— **единственный гарантированно рабочий сценарий OTA** для проекта *Hockey_Remote*.
